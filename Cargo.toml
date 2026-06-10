@@ -1,0 +1,10 @@
+[package]
+name = "oceanfic"
+version = "0.0.1"
+edition = "2024"
+authors = ["fn-a <mr.fna.co@gmail.com>"]
+repository = "https://github.com/fn-a/oceanfic"
+description = "High-performance maritime asset risk control and intelligent management platform powered by Rust and Bevy Engine"
+license = "MIT"
+
+[dependencies]
