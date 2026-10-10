@@ -8,15 +8,14 @@ description = "High-performance maritime asset risk control and intelligent mana
 license = "MIT"
 
 [dependencies]
-bevy = "^0.18"
+bevy = "^0.19"
+anyhow = "^1.0"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
-uuid = { version = "^1.23", features = ["v4"] }
-chrono = "^0.4"
-thiserror = "^2.0"
 
 [profile.dev]
 opt-level = 1
 
-[profile.dev.package."*"]
+[profile.release]
 opt-level = 3
+lto = "thin"

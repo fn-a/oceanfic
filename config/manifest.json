@@ -1,0 +1,10 @@
+{
+  "lighting": "realistic",
+  "camera": { "dist": 3.0, "yaw_deg": 0.0, "pitch_deg": 20.0 },
+  "colors": {
+    "ocean": "#0d2666",
+    "land_line": "#9fd98a",
+    "land_fill": "#3f6b45",
+    "grid": "#a9c6e2"
+  }
+}
