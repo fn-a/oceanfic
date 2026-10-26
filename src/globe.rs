@@ -7,6 +7,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use crate::config::{Manifest, Colors, Lighting};
 use crate::geo::GeoPoint;
+use crate::geo::fetch::Quest;
 use crate::geo::store::Levels;
 use crate::geo::mask::{MASK_WIDTH, MASK_HEIGHT, rasterize};
 
@@ -29,53 +30,19 @@ pub struct Globe;
 #[derive(Component)]
 pub struct Light;
 
+/// 全局陆地遮罩的已应用代次（底图热加载后重建纹理用）。
+#[derive(Resource, Default)]
+pub struct Shore {
+    epoch: u64,
+}
+
 pub fn setup_globe(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
     manifest: Res<Manifest>,
-    levels: Res<Levels>,
 ) {
     let ocean = Colors::parsex(&manifest.colors.ocean).unwrap_or([0.05, 0.15, 0.4]);
-    let land = Colors::parsex(&manifest.colors.land_fill).unwrap_or([0.25, 0.42, 0.27]);
-
-    // 从**全球档**（GSHHG intermediate）现栅格化一张全局遮罩。
-    let rings: Vec<Vec<[f64; 2]>> = levels
-        .lo
-        .lines
-        .iter()
-        .map(|r| r.iter().map(|p| [p.lon, p.lat]).collect())
-        .collect();
-
-    // 远景填色 = 球体上的**全局遮罩纹理**（近景由 coast 的局部补丁负责）。
-    let mask = rasterize(&rings, MASK_WIDTH, MASK_HEIGHT);
-
-    let texels = mask.width as usize * mask.height as usize;
-    let pctval = if texels > 0 {
-        mask.count() as f32 / texels as f32 * 100.0
-    } else {
-        0.0
-    };
-    info!(
-        "land mask: {:.1}% set {}x{} ({} ms, from GSHHG lo)",
-        pctval,
-        mask.width,
-        mask.height,
-        Instant::now().elapsed().as_millis()
-    );
-    let rgba = mask.srgba(land, ocean);
-    let texture = Some(images.add(Image::new(
-        Extent3d {
-            width: mask.width,
-            height: mask.height,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        rgba,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    )));
     let mesh = {
         // 由经纬度生成 UV 球；UV 与遮罩的等距圆柱栅格**严格对齐**（u = lon, v = lat）。
         // 球体网格密度（经纬分段）。贴近时球体轮廓的圆滑度由它决定。
@@ -115,15 +82,12 @@ pub fn setup_globe(
         mesh.insert_indices(Indices::U32(indices));
         mesh
     };
+    // 先给出纯海洋球体；底图可用后贴上全局陆地遮罩。
     commands.spawn((
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: if texture.is_some() {
-                Color::WHITE
-            } else {
-                Color::srgb(ocean[0], ocean[1], ocean[2])
-            },
-            base_color_texture: texture,
+            base_color: Color::srgb(ocean[0], ocean[1], ocean[2]),
+            base_color_texture: None,
             metallic: 0.0,
             perceptual_roughness: 0.9,
             ..default()
@@ -131,6 +95,82 @@ pub fn setup_globe(
         Transform::default(),
         Globe,
     ));
+    commands.insert_resource(Shore::default());
+}
+
+/// 底图首次可用或热加载后，重建球体上的全局陆地遮罩纹理。
+pub fn update_globe(
+    mut levels: ResMut<Levels>,
+    mut state: ResMut<Shore>,
+    manifest: Res<Manifest>,
+    fquest: Option<ResMut<Quest>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    globe: Query<&MeshMaterial3d<StandardMaterial>, With<Globe>>,
+) {
+    if let Some(mut quest) = fquest {
+        if let Some(newlvs) = quest.pumpup(&levels) {
+            *levels = newlvs;
+        }
+    }
+
+    if state.epoch != levels.epoch {
+        let ocean = Colors::parsex(&manifest.colors.ocean).unwrap_or([0.05, 0.15, 0.4]);
+        let land = Colors::parsex(&manifest.colors.land_fill).unwrap_or([0.25, 0.42, 0.27]);
+    
+        let texture = levels.lo.as_ref().map(|lo| {
+            // 从**全球档**（GSHHG intermediate）现栅格化一张全局遮罩。
+            let rings: Vec<Vec<[f64; 2]>> = lo
+                .lines
+                .iter()
+                .map(|r| r.iter().map(|p| [p.lon, p.lat]).collect())
+                .collect();
+    
+            let t0 = Instant::now();
+            let mask = rasterize(&rings, MASK_WIDTH, MASK_HEIGHT);
+            let texels = mask.width as usize * mask.height as usize;
+            let pctval = if texels > 0 {
+                mask.count() as f32 / texels as f32 * 100.0
+            } else {
+                0.0
+            };
+            info!(
+                "land mask: {:.1}% set {}x{} ({} ms, from GSHHG lo)",
+                pctval,
+                mask.width,
+                mask.height,
+                t0.elapsed().as_millis()
+            );
+            let rgba = mask.srgba(land, ocean);
+            images.add(Image::new(
+                Extent3d {
+                    width: mask.width,
+                    height: mask.height,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                rgba,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::default(),
+            ))
+        });
+    
+        for material in &globe {
+            if let Some(mut mat) = materials.get_mut(&material.0) {
+                match &texture {
+                    Some(tex) => {
+                        mat.base_color = Color::WHITE;
+                        mat.base_color_texture = Some(tex.clone());
+                    }
+                    None => {
+                        mat.base_color = Color::srgb(ocean[0], ocean[1], ocean[2]);
+                        mat.base_color_texture = None;
+                    }
+                }
+            }
+        }
+        state.epoch = levels.epoch;
+    }
 }
 
 /// 平行光。环境光必须挂在相机上。

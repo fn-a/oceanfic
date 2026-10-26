@@ -1,10 +1,11 @@
 //! 视野取环：决定"当前视野用哪些底图环"。
 
+use std::ptr;
 use std::sync::Arc;
 use bevy::prelude::*;
 use crate::globe::EARTHR;
 use crate::camera::CameraState;
-use crate::geo::store::{Levels, Level};
+use crate::geo::store::Levels;
 use crate::geo::{GeoPoint, GeoCubid, GeoShape};
 use crate::glyphs::GlyphLayer;
 use super::Coastl;
@@ -30,6 +31,8 @@ pub struct Coastv {
     pub detail: bool,
     /// 上次重选的时刻（秒）：拖动时节流，最多每 150ms 一次
     pub lastselt: f32,
+    /// 这份选环结果对应的底图代次（热加载后强制重选）
+    pub epoch: u64,
 }
 
 impl Coastv {
@@ -82,6 +85,12 @@ pub fn update_coastv(
     cam: Res<CameraState>,
     time: Res<Time>,
 ) {
+    // 底图热加载/消失：上一轮选出的环已经失效。
+    if view.epoch != levels.epoch {
+        view.epoch = levels.epoch;
+        view.selected = false;
+    }
+
     // **节流**：拖动/缩放时每帧都重选会导致明显卡顿（取环+简化+三角化+两套网格重建）。
     // 最多每 150ms 一次；被跳过的变化会在下一帧被 stale() 捕获，不会丢。
     // 注意首帧必须进来：`stale()` 正是靠 `selected == false` 做第一次选择。
@@ -92,58 +101,73 @@ pub fn update_coastv(
         // 可见盒 = 屏幕跨度 × 该倍数。余量让平移时边缘不至于立刻缺数据。
         // 覆盖面放大：往回拖动仍在**已建范围内** ⇒ 不触发重建。
         let bx = GeoCubid::view(cam.view().fov, cam.dist, center, 2.0);
-        let level: &Level = levels.pick(alt);
-        let detail = std::ptr::eq(level, &levels.hi);
-        if view.stale(cam.dist, center, detail) {
-            let ids = level.ringsin(bx);
-        
-            let mut outline: Vec<GeoShape> = Vec::new();
-            let mut fill: Vec<Vec<GeoPoint>> = Vec::new();
-            let mut points = 0usize;
-            for id in &ids {
-                let r = &level.lines[*id as usize];
-                // 填充：**不裁剪**，直接用整环。
-                if r.len() >= 3 {
-                    // 先展开经度（跨日界线的环在平面里必须连续，否则 ±180 的竖直边相隔 360，
-                    // 三角化会把环当成横跨全球的多边形）。**不裁剪**，只做连续化。
-                    let mut cont = bx.shift2frame(r);
-                    // shift_into_frame 会追加收口点；环本来就隐含闭合，重复点会让耳切收尾时
-                    // 产出一个巨大的退化三角形（实测面积比冲到 284）。
-                    if cont.len() >= 2 {
-                        let (f, l) = (cont[0], cont[cont.len() - 1]);
-                        if (f.lon - l.lon).abs() < 1e-12 && (f.lat - l.lat).abs() < 1e-12 {
-                            cont.pop();
+        if let Some(level) = levels.pick(alt) {
+            let detail = levels.hi.as_ref().is_some_and(|hi| ptr::eq(level, hi));
+            if view.stale(cam.dist, center, detail) {
+                let ids = level.ringsin(bx);
+            
+                let mut outline: Vec<GeoShape> = Vec::new();
+                let mut fill: Vec<Vec<GeoPoint>> = Vec::new();
+                let mut points = 0usize;
+                for id in &ids {
+                    let r = &level.lines[*id as usize];
+                    // 填充：**不裁剪**，直接用整环。
+                    if r.len() >= 3 {
+                        // 先展开经度（跨日界线的环在平面里必须连续，否则 ±180 的竖直边相隔 360，
+                        // 三角化会把环当成横跨全球的多边形）。**不裁剪**，只做连续化。
+                        let mut cont = bx.shift2frame(r);
+                        // shift_into_frame 会追加收口点；环本来就隐含闭合，重复点会让耳切收尾时
+                        // 产出一个巨大的退化三角形（实测面积比冲到 284）。
+                        if cont.len() >= 2 {
+                            let (f, l) = (cont[0], cont[cont.len() - 1]);
+                            if (f.lon - l.lon).abs() < 1e-12 && (f.lat - l.lat).abs() < 1e-12 {
+                                cont.pop();
+                            }
+                        }
+                        points += cont.len();
+                        fill.push(cont);
+                    }
+                    // 描边：**所有环都画**（外环 + 洞）。
+                    for run in bx.clipolyline(r) {
+                        if run.len() >= 2 {
+                            points += run.len();
+                            outline.push(GeoShape::Line(run));
                         }
                     }
-                    points += cont.len();
-                    fill.push(cont);
                 }
-                // 描边：**所有环都画**（外环 + 洞）。
-                for run in bx.clipolyline(r) {
-                    if run.len() >= 2 {
-                        points += run.len();
-                        outline.push(GeoShape::Line(run));
-                    }
+            
+                // 描边环就地落到图层：以前这里是一次性交接（`fresh`）+ 另一个 system 取走。
+                if let Ok(mut l) = stroke.single_mut() {
+                    l.shapes = outline;
+                    l.touched();
                 }
+                view.fill = Arc::new(fill);
+                view.level = if detail { "hi (GSHHG full)" } else { "lo (GSHHG intermediate)" };
+                view.rings = ids.len();
+                view.points = points;
+                view.last_dist = cam.dist;
+                view.last_cubd = bx;
+                view.selected = true;
+                view.detail = detail;
+                view.lastselt = now;
+                view.seq = view.seq.wrapping_add(1);
+            
+                debug!("view: {} rings={} pts={} alt={:.3}", view.level, view.rings, view.points, alt);
             }
-        
-            // 描边环就地落到图层：以前这里是一次性交接（`fresh`）+ 另一个 system 取走。
+        } else {
+            // 没有任何底图数据：保持空场景，不报错。
             if let Ok(mut l) = stroke.single_mut() {
-                l.shapes = outline;
-                l.touched();
+                if !l.shapes.is_empty() {
+                    l.shapes.clear();
+                    l.touched();
+                }
             }
-            view.fill = std::sync::Arc::new(fill);
-            view.level = if std::ptr::eq(level, &levels.hi) { "hi (GSHHG full)" } else { "lo (GSHHG intermediate)" };
-            view.rings = ids.len();
-            view.points = points;
-            view.last_dist = cam.dist;
-            view.last_cubd = bx;
-            view.selected = true;
-            view.detail = detail;
+            view.fill = Arc::new(Vec::new());
+            view.level = "none";
+            view.rings = 0;
+            view.points = 0;
+            view.selected = false;
             view.lastselt = now;
-            view.seq = view.seq.wrapping_add(1);
-        
-            debug!("view: {} rings={} pts={} alt={:.3}", view.level, view.rings, view.points, alt);
-        }
+        };
     }
 }

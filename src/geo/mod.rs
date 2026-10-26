@@ -7,6 +7,8 @@ use crate::globe::EARTHR;
 pub mod mask;
 pub mod work;
 pub mod store;
+pub mod bake;
+pub mod fetch;
 
 pub const DEG_TO_RAD: f64 = PI / 180.0;
 pub const RAD_TO_DEG: f64 = 180.0 / PI;

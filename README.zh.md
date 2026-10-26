@@ -73,7 +73,7 @@ cargo build --release
 
 ### 底图数据
 
-`assets/` 下随仓库分发两档预生成的 [GSHHG](https://www.soest.hawaii.edu/pwessel/gshhg/)
+`assets/` 下使用两档预生成的 [GSHHG](https://www.soest.hawaii.edu/pwessel/gshhg/) 2.3.7
 数据，启动时读取一次（先找与可执行文件同级的 `assets/`，再回落到工作目录下的 `assets/`）：
 
 | 文件 | 来源 | 环数 / 点数 | 体积 | `altmax` |
@@ -82,6 +82,17 @@ cargo build --release
 | `coastlo.bin` | 同上，**intermediate** 分辨率 | 40,970 / 450,926 | 3.6 MB | ∞（始终可用）|
 
 格式：24 字节头（magic `OFBM`、版本、`altmax`、点数、xxh32 校验、flags）+ i32 微度 delta 载荷，每条环的增量序列各自从 0 开始。
+
+任意一档 `.bin` 缺失或损坏时，程序仍会正常启动（只是暂时不显示海岸线数据），并由后台线程补齐：
+
+1. 同时探测 [SOEST 镜像](https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-shp-2.3.7.zip) 与
+   [GitHub Release](https://github.com/GenericMappingTools/gshhg-gmt/releases/tag/2.3.7)，
+   走可访问且更快的路线下载 `gshhg-shp-2.3.7.zip`（约 142 MiB）；
+2. 将压缩包缓存到可执行文件同级的 `cache/`，不存在时使用工作目录下的 `cache/`；
+3. 从包中取出所需的 `L1`–`L5` shapefile，按与上表相同的格式烘焙到 `assets/`；
+4. 热加载到正在运行的程序中。
+
+进度会以 `[basemap]` 前缀输出到控制台。下载失败（例如离线）时程序继续无底图运行，下次启动再试。
 
 ## 路线图
 

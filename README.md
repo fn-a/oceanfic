@@ -73,9 +73,9 @@ cargo build --release
 
 ### Base map data
 
-Two pre-generated [GSHHG](https://www.soest.hawaii.edu/pwessel/gshhg/) levels ship in
-`assets/` and are read once at startup (from `assets/` next to the executable, falling
-back to `assets/` in the working directory):
+Two pre-generated [GSHHG](https://www.soest.hawaii.edu/pwessel/gshhg/) 2.3.7 levels are read once
+at startup (first from `assets/` next to the executable, then from `assets/` in the working
+directory):
 
 | File | Source | Rings / points | Size | `altmax` |
 | --- | --- | --- | --- | --- |
@@ -85,6 +85,18 @@ back to `assets/` in the working directory):
 Format: a 24-byte header — magic `OFBM`,
 version, `altmax`, point count, xxh32 checksum, flags — followed by i32 micro-degree
 deltas, with each ring's delta sequence restarting at zero.
+
+When either `.bin` file is missing or invalid, the app still starts (without coastline data) and a background thread prepares it:
+
+1. probes both the [SOEST mirror](https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-shp-2.3.7.zip)
+   and the [GitHub release](https://github.com/GenericMappingTools/gshhg-gmt/releases/tag/2.3.7)
+   and downloads `gshhg-shp-2.3.7.zip` (≈142 MiB) over the faster reachable route;
+2. caches the archive in `cache/` next to the executable, falling back to `cache/` in the working directory;
+3. extracts the required `L1`–`L5` shapefiles and bakes them into `assets/` with the same format as the tables above;
+4. hot-loads the result into the running app.
+
+Progress is printed to the console with a `[basemap]` prefix. If the download fails (e.g. offline),
+the app keeps running without basemap data and simply retries on the next launch.
 
 ## Roadmap
 

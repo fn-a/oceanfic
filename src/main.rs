@@ -1,7 +1,6 @@
 // 发布构建不要附带控制台窗口；debug 保留控制台以便看日志
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process;
 use bevy::prelude::*;
 use bevy::log::LogPlugin;
 use bevy::window::WindowPlugin;
@@ -11,6 +10,7 @@ use oceanfic::coast;
 use oceanfic::grid;
 use oceanfic::metrics;
 use oceanfic::camera;
+use oceanfic::geo::fetch::Quest;
 use oceanfic::geo::work::Worker;
 use oceanfic::geo::store::Levels;
 use oceanfic::geo::{GeoPoint, GeoShape};
@@ -45,25 +45,23 @@ fn main() {
         warn!("{w}");
     }
 
-    let levels = match Levels::load() {
-        Ok(l) => {
-            info!(
-                "basemap: lo {} rings/{} pts, hi {} rings/{} pts",
-                l.lo.rcount(),
-                l.lo.pcount(),
-                l.hi.rcount(),
-                l.hi.pcount()
-            );
-            l
-        }
-        Err(e) => {
-            error!("cannot load basemap: {e} (check assets/)");
-            process::exit(1);
-        }
-    };
+    // 资产缺失/损坏不阻断启动：加载可用档位，后台负责下载并烘焙，完成后热加载。
+    let (levels, cases) = Levels::load();
+    for case in &cases {
+        warn!("basemap: {case}");
+    }
+    if levels.lo.is_none() && levels.hi.is_none() {
+        info!("basemap: no coastline data; starting without basemap");
+    } else {
+        info!("basemap: {}.", levels.counts());
+    }
 
-    app.insert_resource(levels)
-        .insert_resource(Worker::spawn())
+    if let Some(quest) = Quest::intend(&levels) {
+        app.insert_resource(quest);
+    }
+
+    app.insert_resource(Worker::spawn())
+        .insert_resource(levels)
         .insert_resource(manifest.lighting)
         .insert_resource(manifest)
         .add_systems(
@@ -84,6 +82,7 @@ fn main() {
             Update,
             (
                 globe::toggle_light,
+                globe::update_globe,
                 coast::update_coastv,
                 coast::update_ldfill,
                 globe::apply_light,

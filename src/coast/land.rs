@@ -171,8 +171,10 @@ pub fn update_ldfill(
     }
 
     // 2) 远景不需要补丁（球体上的全局遮罩负责）。
-    // 门槛取**细节档自己的**可信上限。
-    if (cam.dist - EARTHR) >= levels.hi.altmax {
+    // 门槛取**细节档自己的**可信上限；hi 缺失时近景仍用 lo 补丁，远景交给全局遮罩。
+    let altmax = levels.hi.as_ref().map(|h| h.altmax).unwrap_or(0.16);
+    let diffv = cam.dist - EARTHR;
+    if levels.pick(diffv.max(0.0)).is_none() || diffv >= altmax {
         if let Ok(mut v) = vis.get_mut(fill.entity) {
             *v = Visibility::Hidden;
         }

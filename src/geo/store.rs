@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use bevy::prelude::Resource;
 use anyhow::{Result, anyhow};
-use crate::config::assetp;
+use crate::config::assetdir;
 use crate::geo::{GeoPoint, GeoCubid};
 
 pub const HEADER_LEN: usize = 24;
@@ -71,7 +71,7 @@ const P4: u32 = 0x27D4_EB2F;
 const P5: u32 = 0x1656_67B1;
 
 /// 标准 xxHash32。用作载荷校验（抓截断与位翻转）。
-fn xxh32(data: &[u8], seed: u32) -> u32 {
+pub fn xxh32(data: &[u8], seed: u32) -> u32 {
     let len = data.len();
     let mut i = 0usize;
     let mut h: u32;
@@ -335,28 +335,57 @@ pub const COAST_HI_BIN: &str = "coasthi.bin";
 /// 全球档（intermediate）。远景与兜底。
 pub const COAST_LO_BIN: &str = "coastlo.bin";
 
-/// 两档底图。
-#[derive(Resource)]
+/// 两档底图。任一档缺失时依然可以启动：远景需要 lo，近景优先 hi、否则退回 lo。
+#[derive(Resource, Default)]
 pub struct Levels {
-    pub lo: Level,
-    pub hi: Level,
+    pub lo: Option<Level>,
+    pub hi: Option<Level>,
+    /// 数据代次：热加载替换数据后 +1，渲染系统据此重建遮罩与选环。
+    pub epoch: u64,
 }
 
 impl Levels {
-    /// 加载随仓库分发的两个资产（85 MB，启动时读一次；解码后常驻内存约 180 MB）。
-    pub fn load() -> Result<Self> {
-        Ok(Self {
-            lo: Level::load(&assetp(COAST_LO_BIN))?,
-            hi: Level::load(&assetp(COAST_HI_BIN))?,
-        })
+    /// 加载当前 `assets/` 中**可用**的资产；缺失或损坏的档位留空，不阻断启动。
+    /// 只有"文件存在但无法解码"才返回告警；单纯缺文件由启动日志说明并交给后台补齐。
+    pub fn load() -> (Self, Vec<String>) {
+        let mut cases = Vec::new();
+        let mut onelv = |name: &str| {
+            let path = assetdir().join(name);
+            match Level::load(&path) {
+                Ok(level) => Some(level),
+                Err(e) => {
+                    // 缺文件是正常的首次运行状态；只有存在但读不出来才值得告警。
+                    if path.exists() {
+                        cases.push(format!("{name}: {e}"));
+                    }
+                    None
+                }
+            }
+        };
+        let lo = onelv(COAST_LO_BIN);
+        let hi = onelv(COAST_HI_BIN);
+        (Self { lo, hi, epoch: 1 }, cases)
     }
 
     /// 按视高选档：低于细节档 `altmax` 用细节档，否则全球档。
-    pub fn pick(&self, alt: f32) -> &Level {
-        if alt < self.hi.altmax {
-            &self.hi
+    /// hi 缺失时近景也退回 lo；两档都缺失时返回 None。
+    pub fn pick(&self, alt: f32) -> Option<&Level> {
+        if let Some(hi) = &self.hi {
+            if alt < hi.altmax {
+                Some(hi)
+            } else {
+                self.lo.as_ref()
+            }
         } else {
-            &self.lo
+            self.lo.as_ref()
         }
+    }
+
+    pub fn counts(&self) -> String {
+        let show = |l: &Option<Level>| match l {
+            Some(l) => format!("{} rings/{} pts", l.rcount(), l.pcount()),
+            None => "missing".to_string(),
+        };
+        format!("lo {}, hi {}", show(&self.lo), show(&self.hi))
     }
 }

@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::env;
+use std::process;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::fmt::{Display, Formatter, Result};
@@ -176,13 +177,46 @@ pub fn exedir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 资产查找：先看 **exe 同级** 的 `assets/`（发布形态就是 exe + config/ + assets/），
-/// 再看当前工作目录。
-pub fn assetp(name: &str) -> PathBuf {
-    let cand = exedir().join("assets").join(name);
-    if cand.exists() {
-        return cand;
+/// 选择使用目录，并判断是否可写入
+pub fn usedir(name: &str) -> PathBuf {
+    let exe = exedir().join(name);
+    if exe.is_dir() && writable(&exe) {
+        exe
     } else {
-        Path::new("assets").join(name)
+        let cwd = PathBuf::from(name);
+        if cwd.is_dir() && writable(&cwd) {
+            cwd
+        } else {
+            if fs::create_dir_all(&cwd).is_ok() && writable(&cwd) {
+                cwd
+            } else {
+                let _ = fs::create_dir_all(&exe);
+                exe
+            }
+        }
+    }
+}
+
+// 生成资产写到哪里：优先已存在的 exe 同级 `assets/`（发布形态），
+// 其次工作目录 `assets/`（`cargo run`），都不存在则在工作目录创建。
+pub fn assetdir() -> PathBuf {
+    usedir("assets")
+}
+
+/// 缓存目录：与资产目录同一套查找规则——优先 exe 同级 `cache/`，
+/// 其次工作目录 `cache/`，都不存在则在工作目录创建。
+pub fn cachedir() -> PathBuf {
+    usedir("cache")
+}
+
+// 判断是否能写入
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".oceanfic-{}", process::id()));
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
